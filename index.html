@@ -1,0 +1,413 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Field Report</title>
+<script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+<script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+<script type="module" id="firebase-init">
+  import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
+  import { getFirestore, collection, addDoc, getDocs, doc, updateDoc, deleteDoc, onSnapshot, orderBy, query } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js";
+  import { getStorage, ref, uploadBytes, getDownloadURL, deleteObject } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-storage.js";
+
+  const firebaseConfig = {
+    apiKey: "AIzaSyCBXiPZ18liiJBIi3cQ4ChCd-X202CXqnk",
+    authDomain: "field-report-942b7.firebaseapp.com",
+    projectId: "field-report-942b7",
+    storageBucket: "field-report-942b7.firebasestorage.app",
+    messagingSenderId: "18583674874",
+    appId: "1:18583674874:web:300238b241d780acc58e43"
+  };
+
+  const app = initializeApp(firebaseConfig);
+  const db = getFirestore(app);
+  const storage = getStorage(app);
+
+  window._fb = {
+    db, storage,
+    collection, addDoc, getDocs, doc, updateDoc, deleteDoc, onSnapshot, orderBy, query,
+    ref, uploadBytes, getDownloadURL, deleteObject
+  };
+  window.dispatchEvent(new Event("firebase-ready"));
+</script>
+<style>
+* { margin:0; padding:0; box-sizing:border-box; }
+body {
+  background:#0d0d0d; color:#f0f0f0; min-height:100vh;
+  font-family:'Century Gothic','CenturyGothic','AppleGothic',Futura,'Trebuchet MS',sans-serif;
+}
+input,textarea,button { font-family:inherit; }
+input[type=date] { color-scheme:dark; }
+textarea { resize:vertical; }
+::-webkit-scrollbar { width:4px; }
+::-webkit-scrollbar-thumb { background:#333; border-radius:4px; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel" data-type="module">
+const { useState, useRef, useCallback, useEffect } = React;
+
+const C = {
+  bg:"#0d0d0d", surface:"#161616", surface2:"#1e1e1e",
+  border:"#2a2a2a", borderLight:"#333",
+  accent:"#e8ff47", text:"#f0f0f0", muted:"#666", muted2:"#888", field:"#4fc3f7"
+};
+
+const FIELDS = [
+  { key:"place",   label:"장소", icon:"📍", ph:"작업 / 방문 장소", tall:false },
+  { key:"vehicle", label:"차량", icon:"🚗", ph:"차량 모델명, 연식, 번호판 등", tall:false },
+  { key:"product", label:"제품", icon:"📦", ph:"설치 / 시연 / 점검한 제품명", tall:false },
+  { key:"content", label:"내용", icon:"📝", ph:"작업 내용, 미팅 결과, 특이사항 등...", tall:true },
+];
+
+function uid() { return "_"+Math.random().toString(36).slice(2,10); }
+function todayIso() { return new Date().toISOString().slice(0,10); }
+function fmtDate(iso) {
+  if(!iso) return "날짜 미입력";
+  const [y,m,d]=iso.split("-"); return `${y}.${m}.${d}`;
+}
+
+// ── 업로드 버튼 ──
+function UploadButton({ onFiles, uploading }) {
+  const ref = useRef(null);
+  const [hover, setHover] = useState(false);
+  return (
+    <>
+      <input ref={ref} type="file" accept="image/*,video/*" multiple
+        style={{display:"none"}}
+        onChange={e=>{
+          const files=Array.from(e.target.files||[]);
+          if(files.length) onFiles(files);
+          e.target.value="";
+        }}
+      />
+      <button type="button"
+        disabled={uploading}
+        onClick={()=>{ if(ref.current){ref.current.value="";ref.current.click();} }}
+        onMouseEnter={()=>setHover(true)}
+        onMouseLeave={()=>setHover(false)}
+        style={{width:90,height:80,borderRadius:8,border:`1.5px dashed ${hover?C.accent:C.borderLight}`,background:"transparent",color:uploading?"#555":(hover?C.accent:C.muted),cursor:uploading?"not-allowed":"pointer",display:"flex",alignItems:"center",justifyContent:"center",flexDirection:"column",gap:4,transition:"all 0.15s"}}>
+        <span style={{fontSize:uploading?14:22,lineHeight:1}}>{uploading?"⏳":"＋"}</span>
+        <span style={{fontSize:9,letterSpacing:"0.08em"}}>{uploading?"업로드중":"첨부"}</span>
+      </button>
+    </>
+  );
+}
+
+// ── 라이트박스 ──
+function Lightbox({url,onClose}) {
+  return (
+    <div onClick={onClose} style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.93)",zIndex:999,display:"flex",alignItems:"center",justifyContent:"center",cursor:"zoom-out"}}>
+      <img src={url} alt="" onClick={e=>e.stopPropagation()} style={{maxWidth:"92vw",maxHeight:"92vh",borderRadius:8}}/>
+    </div>
+  );
+}
+
+// ── 보고서 뷰 ──
+function ReportView({meta,days,onClose}) {
+  return (
+    <div style={{position:"fixed",inset:0,background:"#fafafa",zIndex:300,overflowY:"auto",padding:"36px 40px 60px",fontFamily:"'Century Gothic','CenturyGothic','AppleGothic',Futura,sans-serif"}}>
+      <button onClick={onClose} style={{position:"fixed",top:16,right:16,background:"#111",color:"#fff",border:"none",borderRadius:8,padding:"7px 15px",fontSize:12,cursor:"pointer",zIndex:301}}>✕ 닫기</button>
+      <div style={{maxWidth:720,margin:"0 auto"}}>
+        <div style={{borderBottom:"2.5px solid #111",paddingBottom:16,marginBottom:28}}>
+          <div style={{fontSize:22,fontWeight:700,color:"#111",letterSpacing:"0.04em"}}>출장 현장 보고서</div>
+          <div style={{fontSize:12,color:"#666",marginTop:6}}>{meta.dest||"—"} ｜ {meta.client||"—"} ｜ {meta.period||"—"} ｜ 작성: {meta.reporter||"—"}</div>
+        </div>
+        {days.length===0&&<p style={{color:"#999",fontSize:13}}>기록된 내용이 없습니다.</p>}
+        {days.map((d,i)=>(
+          <div key={d.id} style={{marginBottom:36}}>
+            <div style={{fontWeight:700,fontSize:14,background:"#efefef",padding:"9px 14px",borderRadius:6,marginBottom:16,color:"#111"}}>
+              DAY {i+1} — {fmtDate(d.date)}
+            </div>
+            {FIELDS.map(f=> d[f.key]?(
+              <div key={f.key} style={{marginBottom:14}}>
+                <div style={{fontSize:10,textTransform:"uppercase",letterSpacing:"0.12em",color:"#999",marginBottom:3}}>{f.icon} {f.label}</div>
+                <div style={{fontSize:13,color:"#222",lineHeight:1.75,whiteSpace:"pre-wrap"}}>{d[f.key]}</div>
+              </div>
+            ):null)}
+            {(d.mediaFiles||[]).length>0&&(
+              <div style={{marginTop:14}}>
+                <div style={{fontSize:10,textTransform:"uppercase",letterSpacing:"0.1em",color:"#999",marginBottom:8}}>📷 사진 / 영상 ({d.mediaFiles.length})</div>
+                <div style={{display:"flex",flexWrap:"wrap",gap:8}}>
+                  {d.mediaFiles.map((m,j)=>
+                    m.type&&m.type.startsWith("video")
+                      ? <video key={j} src={m.url} controls style={{width:220,height:140,borderRadius:6,border:"1px solid #ddd"}}/>
+                      : <img key={j} src={m.url} alt="" style={{width:140,height:100,objectFit:"cover",borderRadius:6,border:"1px solid #ddd"}}/>
+                  )}
+                </div>
+              </div>
+            )}
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+// ── 메인 앱 ──
+function App() {
+  const [fbReady, setFbReady]       = useState(!!window._fb);
+  const [meta, setMeta]             = useState({dest:"",client:"",period:"",reporter:"Ho"});
+  const [days, setDays]             = useState([]);
+  const [collapsed, setCollapsed]   = useState({});
+  const [lightbox, setLightbox]     = useState(null);
+  const [showReport, setShowReport] = useState(false);
+  const [uploading, setUploading]   = useState({});
+  const [saving, setSaving]         = useState(false);
+  const metaRef = useRef(meta);
+  metaRef.current = meta;
+
+  // Firebase 준비 대기
+  useEffect(()=>{
+    if(window._fb){ setFbReady(true); return; }
+    const handler=()=>setFbReady(true);
+    window.addEventListener("firebase-ready",handler);
+    return()=>window.removeEventListener("firebase-ready",handler);
+  },[]);
+
+  // Firestore 실시간 동기화
+  useEffect(()=>{
+    if(!fbReady) return;
+    const { db, collection, query, orderBy, onSnapshot } = window._fb;
+
+    // meta 동기화
+    const unsubMeta = onSnapshot(collection(db,"meta"), snap=>{
+      if(!snap.empty){
+        const d=snap.docs[0].data();
+        setMeta(p=>({...p,...d, _docId:snap.docs[0].id}));
+      }
+    });
+
+    // days 동기화
+    const unsubDays = onSnapshot(query(collection(db,"days"),orderBy("createdAt","asc")), snap=>{
+      const list = snap.docs.map(d=>({id:d.id,...d.data()}));
+      setDays(list);
+    });
+
+    return()=>{ unsubMeta(); unsubDays(); };
+  },[fbReady]);
+
+  // meta 저장
+  const saveMeta = async(newMeta) => {
+    if(!fbReady) return;
+    const { db, collection, addDoc, doc, updateDoc } = window._fb;
+    const { _docId, ...data } = newMeta;
+    if(_docId){
+      await updateDoc(doc(db,"meta",_docId), data);
+    } else {
+      await addDoc(collection(db,"meta"), data);
+    }
+  };
+
+  const handleMetaChange = (k,v) => {
+    const updated = {...meta,[k]:v};
+    setMeta(updated);
+    clearTimeout(window._metaTimer);
+    window._metaTimer = setTimeout(()=>saveMeta(updated),800);
+  };
+
+  // Day 추가
+  const addDay = async() => {
+    if(!fbReady) return;
+    const { db, collection, addDoc } = window._fb;
+    setSaving(true);
+    try {
+      await addDoc(collection(db,"days"),{
+        date:todayIso(), place:"", vehicle:"", product:"", content:"",
+        mediaFiles:[], createdAt:Date.now()
+      });
+    } finally { setSaving(false); }
+  };
+
+  // Day 삭제
+  const removeDay = async(id) => {
+    if(!confirm("이 날짜 기록을 삭제할까요?")) return;
+    const { db, doc, deleteDoc } = window._fb;
+    await deleteDoc(doc(db,"days",id));
+  };
+
+  // Day 필드 업데이트
+  const updateDay = (id, field, val) => {
+    setDays(p=>p.map(d=>d.id===id?{...d,[field]:val}:d));
+    clearTimeout(window["_t"+id+field]);
+    window["_t"+id+field] = setTimeout(async()=>{
+      const { db, doc, updateDoc } = window._fb;
+      await updateDoc(doc(db,"days",id),{[field]:val});
+    },600);
+  };
+
+  // 미디어 업로드
+  const addMedia = useCallback(async(dayId, files) => {
+    if(!fbReady) return;
+    const { storage, db, doc, updateDoc, ref, uploadBytes, getDownloadURL } = window._fb;
+    setUploading(p=>({...p,[dayId]:true}));
+    try {
+      const day = days.find(d=>d.id===dayId);
+      const existing = day?.mediaFiles||[];
+      const newFiles = [];
+      for(const file of files){
+        const path = `days/${dayId}/${Date.now()}_${file.name}`;
+        const storageRef = ref(storage, path);
+        await uploadBytes(storageRef, file);
+        const url = await getDownloadURL(storageRef);
+        newFiles.push({ url, type:file.type, name:file.name, path });
+      }
+      const merged = [...existing, ...newFiles];
+      await updateDoc(doc(db,"days",dayId),{ mediaFiles:merged });
+    } finally {
+      setUploading(p=>({...p,[dayId]:false}));
+    }
+  },[fbReady, days]);
+
+  // 미디어 삭제
+  const removeMedia = async(dayId, idx) => {
+    const { db, doc, updateDoc, storage, ref, deleteObject } = window._fb;
+    const day = days.find(d=>d.id===dayId);
+    const file = day?.mediaFiles?.[idx];
+    if(file?.path){
+      try { await deleteObject(ref(storage, file.path)); } catch(e){}
+    }
+    const updated = (day?.mediaFiles||[]).filter((_,i)=>i!==idx);
+    await updateDoc(doc(db,"days",dayId),{ mediaFiles:updated });
+  };
+
+  const toggle = (id) => setCollapsed(p=>({...p,[id]:!p[id]}));
+
+  const G={background:C.surface2,border:`1px solid ${C.border}`,color:C.text,borderRadius:8,padding:"7px 14px",fontSize:12,cursor:"pointer"};
+  const P={background:C.accent,color:"#000",border:"none",borderRadius:8,padding:"7px 15px",fontSize:12,fontWeight:700,cursor:"pointer"};
+
+  if(!fbReady) return (
+    <div style={{display:"flex",alignItems:"center",justifyContent:"center",height:"100vh",flexDirection:"column",gap:16,color:C.muted}}>
+      <div style={{fontSize:28}}>⏳</div>
+      <div style={{fontSize:13}}>Firebase 연결 중...</div>
+    </div>
+  );
+
+  return (
+    <div style={{background:C.bg,color:C.text,minHeight:"100vh"}}>
+
+      {/* 헤더 */}
+      <div style={{position:"sticky",top:0,zIndex:100,background:"rgba(13,13,13,0.95)",backdropFilter:"blur(12px)",borderBottom:`1px solid ${C.border}`,padding:"0 20px",display:"flex",alignItems:"center",justifyContent:"space-between",height:54}}>
+        <div style={{fontWeight:700,fontSize:14,letterSpacing:"0.12em",color:C.accent,textTransform:"uppercase"}}>
+          Field<span style={{color:C.muted2,fontWeight:400}}>Report</span>
+          {saving&&<span style={{fontSize:10,color:C.muted,marginLeft:10}}>저장중...</span>}
+        </div>
+        <button style={P} onClick={()=>setShowReport(true)}>📄 보고서</button>
+      </div>
+
+      <div style={{maxWidth:760,margin:"0 auto",padding:"28px 20px 80px"}}>
+
+        {/* 출장 기본 정보 */}
+        <div style={{background:C.surface,border:`1px solid ${C.border}`,borderRadius:10,padding:"18px 22px",marginBottom:24,display:"flex",gap:14,flexWrap:"wrap"}}>
+          {[
+            {k:"dest",label:"출장지",ph:"예: Melbourne, Australia"},
+            {k:"client",label:"고객사",ph:"예: Advanced Ice Pty Ltd"},
+            {k:"period",label:"출장 기간",ph:"2025.07.01 – 07.05"},
+            {k:"reporter",label:"담당자",ph:"이름"},
+          ].map(f=>(
+            <div key={f.k} style={{display:"flex",flexDirection:"column",gap:5,flex:1,minWidth:140}}>
+              <div style={{fontSize:10,letterSpacing:"0.12em",color:C.muted,textTransform:"uppercase"}}>{f.label}</div>
+              <input style={{background:C.surface2,border:`1px solid ${C.border}`,borderRadius:6,color:C.text,fontSize:13,padding:"7px 11px",outline:"none"}}
+                value={meta[f.k]||""} placeholder={f.ph}
+                onChange={e=>handleMetaChange(f.k,e.target.value)}/>
+            </div>
+          ))}
+        </div>
+
+        {/* 빈 상태 */}
+        {days.length===0&&(
+          <div style={{textAlign:"center",padding:"48px 20px",color:C.muted}}>
+            <div style={{fontSize:36,marginBottom:14}}>📋</div>
+            <p style={{fontSize:13,lineHeight:1.8}}>아직 기록이 없습니다.<br/>아래 <strong style={{color:C.muted2}}>날짜 추가</strong> 버튼을 눌러 시작하세요.</p>
+          </div>
+        )}
+
+        {/* DAY 카드 */}
+        {days.map((d,i)=>{
+          const isCol=collapsed[d.id];
+          const preview=[d.place,d.vehicle,d.product].filter(Boolean).join(" · ");
+          const dayMedia=d.mediaFiles||[];
+          return (
+            <div key={d.id} style={{background:C.surface,border:`1px solid ${C.border}`,borderRadius:10,marginBottom:18,overflow:"hidden"}}>
+
+              <div onClick={()=>toggle(d.id)} style={{display:"flex",alignItems:"center",gap:12,padding:"14px 18px",borderBottom:isCol?"none":`1px solid ${C.border}`,background:C.surface2,cursor:"pointer",userSelect:"none"}}>
+                <span style={{fontWeight:700,fontSize:11,letterSpacing:"0.1em",background:C.accent,color:"#000",padding:"3px 10px",borderRadius:4,whiteSpace:"nowrap",flexShrink:0}}>DAY {i+1}</span>
+                <input type="date"
+                  style={{background:"transparent",border:"1px solid transparent",borderRadius:6,color:C.text,fontSize:13,padding:"3px 7px",cursor:"pointer",outline:"none",colorScheme:"dark",flexShrink:0}}
+                  value={d.date||""}
+                  onClick={e=>e.stopPropagation()}
+                  onChange={e=>updateDay(d.id,"date",e.target.value)}
+                />
+                {preview&&<span style={{fontSize:11,color:C.muted,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{preview}</span>}
+                <span style={{color:C.muted,fontSize:13,marginLeft:"auto",flexShrink:0,transition:"transform 0.2s",transform:isCol?"rotate(-90deg)":"rotate(0deg)"}}>▾</span>
+              </div>
+
+              {!isCol&&(
+                <div style={{padding:20}}>
+                  {FIELDS.map(f=>(
+                    <div key={f.key} style={{marginBottom:16}}>
+                      <div style={{fontSize:10,letterSpacing:"0.12em",color:C.field,textTransform:"uppercase",marginBottom:7,display:"flex",alignItems:"center",gap:6}}>
+                        <span>{f.icon}</span><span>{f.label}</span>
+                      </div>
+                      {f.tall?(
+                        <textarea style={{width:"100%",background:C.surface2,color:C.text,fontSize:13,lineHeight:1.7,padding:"10px 13px",border:`1px solid ${C.border}`,borderRadius:8,outline:"none",resize:"vertical",minHeight:120}}
+                          placeholder={f.ph} value={d[f.key]||""}
+                          onChange={e=>updateDay(d.id,f.key,e.target.value)}/>
+                      ):(
+                        <input style={{width:"100%",background:C.surface2,color:C.text,fontSize:13,padding:"10px 13px",border:`1px solid ${C.border}`,borderRadius:8,outline:"none"}}
+                          placeholder={f.ph} value={d[f.key]||""}
+                          onChange={e=>updateDay(d.id,f.key,e.target.value)}/>
+                      )}
+                    </div>
+                  ))}
+
+                  {/* 미디어 */}
+                  <div style={{marginBottom:18}}>
+                    <div style={{fontSize:10,letterSpacing:"0.12em",color:C.field,textTransform:"uppercase",marginBottom:10,display:"flex",alignItems:"center",gap:6}}>
+                      <span>📷</span><span>사진 / 영상</span>
+                    </div>
+                    <div style={{display:"flex",flexWrap:"wrap",gap:10,alignItems:"flex-start"}}>
+                      {dayMedia.map((m,idx)=>(
+                        <div key={idx} style={{position:"relative",width:90,height:80,borderRadius:8,overflow:"hidden",border:`1px solid ${C.border}`,flexShrink:0}}>
+                          {m.type&&m.type.startsWith("video")
+                            ?<video src={m.url} muted style={{width:"100%",height:"100%",objectFit:"cover",display:"block"}}/>
+                            :<img src={m.url} alt={m.name} style={{width:"100%",height:"100%",objectFit:"cover",display:"block",cursor:"pointer"}} onClick={()=>setLightbox(m.url)}/>
+                          }
+                          <button onClick={()=>removeMedia(d.id,idx)} style={{position:"absolute",top:3,right:3,background:"rgba(0,0,0,0.82)",color:"#fff",border:"none",borderRadius:"50%",width:20,height:20,fontSize:10,cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center"}}>✕</button>
+                        </div>
+                      ))}
+                      <UploadButton onFiles={files=>addMedia(d.id,files)} uploading={!!uploading[d.id]}/>
+                    </div>
+                  </div>
+
+                  <div style={{display:"flex",justifyContent:"flex-end",paddingTop:14,borderTop:`1px solid ${C.border}`}}>
+                    <button style={{background:"transparent",border:`1px solid ${C.border}`,color:C.muted,borderRadius:8,padding:"6px 14px",fontSize:12,cursor:"pointer"}} onClick={()=>removeDay(d.id)}>🗑 삭제</button>
+                  </div>
+                </div>
+              )}
+            </div>
+          );
+        })}
+
+        {/* 날짜 추가 */}
+        <button onClick={addDay}
+          onMouseEnter={e=>{e.currentTarget.style.borderColor=C.accent;e.currentTarget.style.color=C.accent;}}
+          onMouseLeave={e=>{e.currentTarget.style.borderColor=C.border;e.currentTarget.style.color=C.muted2;}}
+          style={{width:"100%",background:"transparent",border:`1.5px dashed ${C.border}`,color:C.muted2,borderRadius:10,padding:16,fontSize:12,cursor:"pointer",transition:"all 0.15s",letterSpacing:"0.06em"}}>
+          ＋ 날짜 추가
+        </button>
+      </div>
+
+      {lightbox&&<Lightbox url={lightbox} onClose={()=>setLightbox(null)}/>}
+      {showReport&&<ReportView meta={meta} days={days} onClose={()=>setShowReport(false)}/>}
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<App/>);
+</script>
+</body>
+</html>
